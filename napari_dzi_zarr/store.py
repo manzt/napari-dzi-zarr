@@ -86,7 +86,7 @@ class DZIStore:
             ykey, xkey, _ = map(int, chunk_key.split("."))
 
             dzi_path = self._get_dzi_path(level, xkey, ykey)
-            tile = self._get_chunk(dzi_path)
+            tile = self._get_image_tile(dzi_path)
             trimmed_tile = self._normalize_chunk(tile, xkey, ykey)
             return trimmed_tile.tobytes()
         except:
@@ -99,7 +99,7 @@ class DZIStore:
         img_format = self._dzi_meta.format
         return f"{self._files_prefix}_files/{level}/{x}_{y}.{img_format}"
 
-    def _get_chunk(self, img_path: str) -> np.ndarray:
+    def _get_image_tile(self, img_path: str) -> np.ndarray:
         # Get file from store
         cbytes = self._dzi_fmap[img_path]
         # Decode image
@@ -144,6 +144,13 @@ class DZIStore:
 
         return view
 
+    def _get_csize(self, max_level):
+        # Can't determine whether PNG will be RGB/RGBA just from file suffix
+        # Here we use the first image in the pyramid as a representative tile.
+        dzi_path = self._get_dzi_path(max_level, 0, 0)
+        tile = self._get_image_tile(dzi_path)
+        return tile.shape[2]
+
     def _init_zarr_metadata(self) -> dict:
         d = dict()
 
@@ -158,13 +165,14 @@ class DZIStore:
 
         d[ZARR_GROUP_META_KEY] = json_dumps(ZARR_GROUP_META)
         d[ZARR_META_KEY] = json_dumps(create_root_attrs(levels))
+
+        # TODO: Might be a better way to determine RGB/RGBA-ness for pyramid
+        csize = self._get_csize(max_level)
         for level in range(nlevels):
             xsize, ysize = (
                 self._dzi_meta.width // 2 ** level,
                 self._dzi_meta.height // 2 ** level,
             )
-            # png is RGBA, jpeg/jpg is RGB
-            csize = 4 if self._dzi_meta.format == "png" else 3
             array_meta = create_array_meta(
                 shape=(ysize, xsize, csize),
                 chunks=(self._dzi_meta.tilesize, self._dzi_meta.tilesize, csize),
