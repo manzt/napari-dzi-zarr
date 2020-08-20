@@ -1,0 +1,7 @@
+napari-plugin-engine>=0.1.4
+numpy>=0.1.19
+zarr>=0.2.4
+dask[array]>=2.23.0
+fsspec>=0.8.0 
+requests>=2.24.0
+aiohttp>=3.6.2
