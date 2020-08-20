@@ -1,13 +1,12 @@
 from fsspec import get_mapper
 from zarr.util import json_dumps
 import numpy as np
+import imageio
 
 import os
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 import xml.etree.ElementTree as ET
-from PIL import Image
-from io import BytesIO
 from collections import namedtuple
 
 ZARR_FORMAT = 2
@@ -104,9 +103,7 @@ class DZIStore:
         # Get file from store
         cbytes = self._dzi_fmap[img_path]
         # Decode image
-        img = Image.open(BytesIO(cbytes))
-        # Cast to numpy array
-        return np.array(img)
+        return imageio.imread(cbytes)
 
     def _normalize_chunk(self, arr: np.ndarray, x: int, y: int) -> np.ndarray:
         # DZI images have overlapping tiles.
