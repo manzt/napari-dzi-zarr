@@ -5,7 +5,7 @@
 [![Python Version](https://img.shields.io/pypi/pyversions/napari-dzi-zarr.svg?color=green)](https://python.org)
 [![tests](https://github.com/manzt/napari-dzi-zarr/workflows/tests/badge.svg)](https://github.com/manzt/napari-dzi-zarr/actions)
 
-An experimental plugin for viewing Deep Zoom Images (DZI) with napari and zarr. 
+An experimental plugin for viewing Deep Zoom Images (DZI) with napari + zarr + dask.
 
 ----------------------------------
 
@@ -29,7 +29,11 @@ You can install `napari-dzi-zarr` via [pip]:
 
 ## Usage
 
+This high-resolution scan of Rembrandt's Night Watch is available thanks to [R.G Erdmann](https://twitter.com/erdmann). More examples can be found on [boschproject.org](http://boschproject.org).
+
     $ napari http://hyper-resolution.org/dzi/Rijksmuseum/SK-C-5/SK-C-5_VIS_20-um_2019-12-21.dzi
+
+![Rembrandt's Night Watch in napari](./night_watch_napari.png)
 
 ## Contributing
 
