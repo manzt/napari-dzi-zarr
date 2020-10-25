@@ -1,4 +1,4 @@
-from fsspec import get_mapper
+import fsspec
 from zarr.util import json_dumps
 import numpy as np
 import imageio
@@ -36,7 +36,7 @@ def create_root_attrs(levels):
     return {"multiscales": [{"datasets": datasets, "version": "0.1"}]}
 
 
-def parseDZI(xml_str: str):
+def parse_DZI(xml_str: str):
     Image = ET.fromstring(xml_str)
     Size = Image[0]
     return DZIMetadata(
@@ -49,32 +49,11 @@ def parseDZI(xml_str: str):
 
 
 class DZIStore:
-    def __init__(self, path: str, storage_options=None):
-        storage_options = storage_options or {}
-
-        if os.path.isfile(path):
-            # Local DZI
-            local_path = Path(path)
-            self._dzi_fmap = get_mapper(str(local_path.parent), **storage_options)
-            self._files_prefix = local_path.stem
-        else:
-            # Remote DZI (http/https, gc, s3, etc...)
-            url = urlparse(path)
-            url_path = Path(url.path)
-            new_url = urlunparse(
-                (
-                    url.scheme,
-                    url.netloc,
-                    str(url_path.parent),
-                    url.params,
-                    url.query,
-                    url.fragment,
-                )
-            )
-            self._dzi_fmap = get_mapper(new_url, **storage_options)
-            self._files_prefix = url_path.stem
-
-        self._dzi_meta = parseDZI(self._dzi_fmap[f"{self._files_prefix}.dzi"])
+    def __init__(self, url: str, **storage_options):
+        fs, meta_path = fsspec.core.url_to_fs(url, **storage_options)
+        self.fs = fs
+        self.root = meta_path.rsplit(".", 1)[0] + "_files"
+        self._dzi_meta = parse_DZI(fs.cat(meta_path))
         self._metadata_store = self._init_zarr_metadata()
 
     def __getitem__(self, key):
@@ -83,27 +62,20 @@ class DZIStore:
 
         try:
             level, chunk_key = key.split("/")
-            ykey, xkey, _ = map(int, chunk_key.split("."))
+            y, x, _ = chunk_key.split(".")
 
-            dzi_path = self._get_dzi_path(level, xkey, ykey)
-            tile = self._get_image_tile(dzi_path)
-            trimmed_tile = self._normalize_chunk(tile, xkey, ykey)
+            path = f"{self.root}/{level}/{x}_{y}.{self._dzi_meta.format}"
+            # Get file from store
+            cbytes = self.fs.cat(path)
+            # Decode image
+            tile = imageio.imread(cbytes)
+            trimmed_tile = self._normalize_chunk(tile, int(x), int(y))
             return trimmed_tile.tobytes()
         except:
             raise KeyError
 
     def __setitem__(self, key, value):
         raise NotImplementedError
-
-    def _get_dzi_path(self, level: int, x: int, y: int) -> str:
-        img_format = self._dzi_meta.format
-        return f"{self._files_prefix}_files/{level}/{x}_{y}.{img_format}"
-
-    def _get_image_tile(self, img_path: str) -> np.ndarray:
-        # Get file from store
-        cbytes = self._dzi_fmap[img_path]
-        # Decode image
-        return imageio.imread(cbytes)
 
     def _normalize_chunk(self, arr: np.ndarray, x: int, y: int) -> np.ndarray:
         # DZI images have overlapping tiles.
@@ -147,20 +119,24 @@ class DZIStore:
     def _get_csize(self, max_level):
         # Can't determine whether PNG will be RGB/RGBA just from file suffix
         # Here we use the first image in the pyramid as a representative tile.
-        dzi_path = self._get_dzi_path(max_level, 0, 0)
-        tile = self._get_image_tile(dzi_path)
+        path = f"{self.root}/{max_level}/0_0.{self._dzi_meta.format}"
+        # Get file from store
+        cbytes = self.fs.cat(path)
+        # Decode image
+        tile = imageio.imread(cbytes)
         return tile.shape[2]
 
     def _init_zarr_metadata(self) -> dict:
         d = dict()
+        meta = self._dzi_meta
 
         # DZI generates all levels of the pyramid
         # Level 0 is 1x1 image, so we need to calculate the max level (highest resolution)
         # and trim the pyramid to just the tiled levels.
-        max_level = np.ceil(
-            np.log2(max(self._dzi_meta.width, self._dzi_meta.height))
-        ).astype(int)
-        nlevels = max_level - np.ceil(np.log2(self._dzi_meta.tilesize)).astype(int)
+        max_size = max(meta.width, meta.height)
+        max_level = np.ceil(np.log2(max_size)).astype(int)
+
+        nlevels = max_level - np.ceil(np.log2(meta.tilesize)).astype(int)
         levels = list(reversed(range(max_level + 1)))[:nlevels]
 
         d[ZARR_GROUP_META_KEY] = json_dumps(ZARR_GROUP_META)
@@ -169,13 +145,10 @@ class DZIStore:
         # TODO: Might be a better way to determine RGB/RGBA-ness for pyramid
         csize = self._get_csize(max_level)
         for level in range(nlevels):
-            xsize, ysize = (
-                self._dzi_meta.width // 2 ** level,
-                self._dzi_meta.height // 2 ** level,
-            )
+            xsize, ysize = (meta.width // 2 ** level, meta.height // 2 ** level)
             array_meta = create_array_meta(
                 shape=(ysize, xsize, csize),
-                chunks=(self._dzi_meta.tilesize, self._dzi_meta.tilesize, csize),
+                chunks=(meta.tilesize, meta.tilesize, csize),
             )
             d[f"{max_level - level}/{ZARR_ARRAY_META_KEY}"] = json_dumps(array_meta)
 
