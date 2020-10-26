@@ -1,11 +1,8 @@
-from fsspec import get_mapper
+import fsspec
 from zarr.util import json_dumps
 import numpy as np
 import imageio
 
-import os
-from pathlib import Path
-from urllib.parse import urlparse, urlunparse
 import xml.etree.ElementTree as ET
 from collections import namedtuple
 
@@ -13,30 +10,11 @@ ZARR_FORMAT = 2
 ZARR_META_KEY = ".zattrs"
 ZARR_ARRAY_META_KEY = ".zarray"
 ZARR_GROUP_META_KEY = ".zgroup"
-ZARR_GROUP_META = {"zarr_format": ZARR_FORMAT}
 
 DZIMetadata = namedtuple("DZIMetadata", "tilesize overlap format height width")
 
 
-def create_array_meta(shape, chunks):
-    return {
-        "chunks": chunks,
-        "compressor": None,  # chunk is decoded with store, so no zarr compression
-        "dtype": "|u1",  # RGB/A images only
-        "fill_value": 0.0,
-        "filters": None,
-        "order": "C",
-        "shape": shape,
-        "zarr_format": ZARR_FORMAT,
-    }
-
-
-def create_root_attrs(levels):
-    datasets = [{"path": str(i)} for i in levels]
-    return {"multiscales": [{"datasets": datasets, "version": "0.1"}]}
-
-
-def parseDZI(xml_str: str):
+def _parse_DZI(xml_str: str) -> DZIMetadata:
     Image = ET.fromstring(xml_str)
     Size = Image[0]
     return DZIMetadata(
@@ -48,46 +26,118 @@ def parseDZI(xml_str: str):
     )
 
 
+def _init_meta_store(dzi_meta: DZIMetadata, csize: int) -> dict:
+    """Generates zarr metadata key-value mapping for all levels of DZI pyramid"""
+    d = dict()
+    # DZI generates all levels of the pyramid
+    # Level 0 is 1x1 image, so we need to calculate the max level (highest resolution)
+    # and trim the pyramid to just the tiled levels.
+    max_size = max(dzi_meta.width, dzi_meta.height)
+    max_level = np.ceil(np.log2(max_size)).astype(int)
+
+    nlevels = max_level - np.ceil(np.log2(dzi_meta.tilesize)).astype(int)
+    levels = list(reversed(range(max_level + 1)))[:nlevels]
+
+    # Create root group
+    group_meta = dict(zarr_format=ZARR_FORMAT)
+    d[ZARR_GROUP_META_KEY] = json_dumps(group_meta)
+
+    # Create root attrs (multiscale meta)
+    datasets = [dict(path=str(i)) for i in levels]
+    root_attrs = dict(multiscales=[dict(datasets=datasets, version="0.1")])
+    d[ZARR_META_KEY] = json_dumps(root_attrs)
+
+    # Create zarr array meta for each level of DZI pyramid
+    for level in range(nlevels):
+        xsize, ysize = (dzi_meta.width // 2 ** level, dzi_meta.height // 2 ** level)
+        arr_meta_key = f"{max_level - level}/{ZARR_ARRAY_META_KEY}"
+        arr_meta = dict(
+            shape=(ysize, xsize, csize),
+            chunks=(dzi_meta.tilesize, dzi_meta.tilesize, csize),
+            compressor=None,  # chunk is decoded with store, so no zarr compression
+            dtype="|u1",  # RGB/A images only
+            fill_value=0,
+            filters=None,
+            order="C",
+            zarr_format=ZARR_FORMAT,
+        )
+        d[arr_meta_key] = json_dumps(arr_meta)
+
+    return d
+
+
+def _normalize_chunk(
+    arr: np.ndarray, x: int, y: int, dzi_meta: DZIMetadata
+) -> np.ndarray:
+    """Transforms DZI tiles to uniformly sized zarr array chunks"""
+    # https://github.com/openseadragon/openseadragon/wiki/The-DZI-File-Format#overlap
+    # Here we trim overlapping tiles or pad edge tiles based on the chunk key.
+    ysize, xsize, _ = arr.shape
+    tilesize, overlap = dzi_meta.tilesize, dzi_meta.overlap
+
+    if xsize == tilesize and ysize == tilesize:
+        # Decoded image is already correct size.
+        return arr
+
+    # TODO: There is probably a more elegant way to do this...
+    view = arr
+    if xsize - tilesize == 2 * overlap:
+        # Inner x; overlap on left and right
+        view = view[:, overlap:-overlap, :]
+
+    if ysize - tilesize == 2 * overlap:
+        # Inner y; overlap on top and bottom
+        view = view[overlap:-overlap, :, :]
+
+    if xsize - tilesize == overlap:
+        # Edge x; overlap on left or right
+        xslice = slice(None, -overlap) if x == 0 else slice(overlap, None)
+        view = view[:, xslice, :]
+
+    if ysize - tilesize == overlap:
+        # Edge y; overlap on top or bottom
+        yslice = slice(None, -overlap) if y == 0 else slice(overlap, None)
+        view = view[yslice, :, :]
+
+    if view.shape[0] < tilesize or view.shape[1] < tilesize:
+        # Tile is smaller than tilesize; Needs to be padded.
+        y_pad = tilesize - view.shape[0]
+        x_pad = tilesize - view.shape[1]
+        return np.pad(view, ((0, y_pad), (0, x_pad), (0, 0)))
+
+    return view
+
+
 class DZIStore:
-    def __init__(self, path: str, storage_options=None):
-        storage_options = storage_options or {}
+    def __init__(self, url: str, *, pilmode="RGB", **storage_options):
+        fs, meta_path = fsspec.core.url_to_fs(url, **storage_options)
+        self.fs = fs
+        self.root = meta_path.rsplit(".", 1)[0] + "_files"
+        self._dzi_meta = _parse_DZI(fs.cat(meta_path))
 
-        if os.path.isfile(path):
-            # Local DZI
-            local_path = Path(path)
-            self._dzi_fmap = get_mapper(str(local_path.parent), **storage_options)
-            self._files_prefix = local_path.stem
-        else:
-            # Remote DZI (http/https, gc, s3, etc...)
-            url = urlparse(path)
-            url_path = Path(url.path)
-            new_url = urlunparse(
-                (
-                    url.scheme,
-                    url.netloc,
-                    str(url_path.parent),
-                    url.params,
-                    url.query,
-                    url.fragment,
-                )
-            )
-            self._dzi_fmap = get_mapper(new_url, **storage_options)
-            self._files_prefix = url_path.stem
+        if pilmode not in ["RGB", "RGBA"]:
+            raise ValueError(f"pilmode must be 'RGB' or 'RGBA', got: {pilmode}")
 
-        self._dzi_meta = parseDZI(self._dzi_fmap[f"{self._files_prefix}.dzi"])
-        self._metadata_store = self._init_zarr_metadata()
+        self.pilmode = pilmode
+        self._meta_store = _init_meta_store(dzi_meta=self._dzi_meta, csize=len(pilmode))
 
     def __getitem__(self, key):
-        if key in self._metadata_store:
-            return self._metadata_store[key]
+        if key in self._meta_store:
+            return self._meta_store[key]
 
         try:
+            # Transform key to DZI path
             level, chunk_key = key.split("/")
-            ykey, xkey, _ = map(int, chunk_key.split("."))
-
-            dzi_path = self._get_dzi_path(level, xkey, ykey)
-            tile = self._get_image_tile(dzi_path)
-            trimmed_tile = self._normalize_chunk(tile, xkey, ykey)
+            y, x, _ = chunk_key.split(".")
+            path = f"{self.root}/{level}/{x}_{y}.{self._dzi_meta.format}"
+            # Read bytes from abstract file system
+            cbytes = self.fs.cat(path)
+            # Decode bytes as image tile
+            tile = imageio.imread(cbytes, pilmode=self.pilmode)
+            # Normalize DZI tile as zarr chunk
+            trimmed_tile = _normalize_chunk(
+                arr=tile, x=int(x), y=int(y), dzi_meta=self._dzi_meta
+            )
             return trimmed_tile.tobytes()
         except:
             raise KeyError
@@ -95,94 +145,8 @@ class DZIStore:
     def __setitem__(self, key, value):
         raise NotImplementedError
 
-    def _get_dzi_path(self, level: int, x: int, y: int) -> str:
-        img_format = self._dzi_meta.format
-        return f"{self._files_prefix}_files/{level}/{x}_{y}.{img_format}"
-
-    def _get_image_tile(self, img_path: str) -> np.ndarray:
-        # Get file from store
-        cbytes = self._dzi_fmap[img_path]
-        # Decode image
-        return imageio.imread(cbytes)
-
-    def _normalize_chunk(self, arr: np.ndarray, x: int, y: int) -> np.ndarray:
-        # DZI images have overlapping tiles.
-        # https://github.com/openseadragon/openseadragon/wiki/The-DZI-File-Format#overlap
-        # Here we trim overlapping tiles or pad edge tiles based on the chunk key.
-        ysize, xsize, _ = arr.shape
-        tilesize, overlap = self._dzi_meta.tilesize, self._dzi_meta.overlap
-
-        if xsize == tilesize and ysize == tilesize:
-            # Decoded image is already correct size.
-            return arr
-
-        # TODO: There is probably a more elegant way to do this...
-        view = arr
-        if xsize - tilesize == 2 * overlap:
-            # Inner x; overlap on left and right
-            view = view[:, overlap:-overlap, :]
-
-        if ysize - tilesize == 2 * overlap:
-            # Inner y; overlap on top and bottom
-            view = view[overlap:-overlap, :, :]
-
-        if xsize - tilesize == overlap:
-            # Edge x; overlap on left or right
-            xslice = slice(None, -overlap) if x == 0 else slice(overlap, None)
-            view = view[:, xslice, :]
-
-        if ysize - tilesize == overlap:
-            # Edge y; overlap on top or bottom
-            yslice = slice(None, -overlap) if y == 0 else slice(overlap, None)
-            view = view[yslice, :, :]
-
-        if view.shape[0] < tilesize or view.shape[1] < tilesize:
-            # Tile is smaller than tilesize; Needs to be padded.
-            y_pad = tilesize - view.shape[0]
-            x_pad = tilesize - view.shape[1]
-            return np.pad(view, ((0, y_pad), (0, x_pad), (0, 0)))
-
-        return view
-
-    def _get_csize(self, max_level):
-        # Can't determine whether PNG will be RGB/RGBA just from file suffix
-        # Here we use the first image in the pyramid as a representative tile.
-        dzi_path = self._get_dzi_path(max_level, 0, 0)
-        tile = self._get_image_tile(dzi_path)
-        return tile.shape[2]
-
-    def _init_zarr_metadata(self) -> dict:
-        d = dict()
-
-        # DZI generates all levels of the pyramid
-        # Level 0 is 1x1 image, so we need to calculate the max level (highest resolution)
-        # and trim the pyramid to just the tiled levels.
-        max_level = np.ceil(
-            np.log2(max(self._dzi_meta.width, self._dzi_meta.height))
-        ).astype(int)
-        nlevels = max_level - np.ceil(np.log2(self._dzi_meta.tilesize)).astype(int)
-        levels = list(reversed(range(max_level + 1)))[:nlevels]
-
-        d[ZARR_GROUP_META_KEY] = json_dumps(ZARR_GROUP_META)
-        d[ZARR_META_KEY] = json_dumps(create_root_attrs(levels))
-
-        # TODO: Might be a better way to determine RGB/RGBA-ness for pyramid
-        csize = self._get_csize(max_level)
-        for level in range(nlevels):
-            xsize, ysize = (
-                self._dzi_meta.width // 2 ** level,
-                self._dzi_meta.height // 2 ** level,
-            )
-            array_meta = create_array_meta(
-                shape=(ysize, xsize, csize),
-                chunks=(self._dzi_meta.tilesize, self._dzi_meta.tilesize, csize),
-            )
-            d[f"{max_level - level}/{ZARR_ARRAY_META_KEY}"] = json_dumps(array_meta)
-
-        return d
-
     def keys(self):
-        return self._metadata_store.keys()
+        return self._meta_store.keys()
 
     def __iter__(self):
-        return iter(self._metadata_store)
+        return iter(self._meta_store)
