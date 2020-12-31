@@ -72,38 +72,35 @@ def _normalize_chunk(
     """Transforms DZI tiles to uniformly sized zarr array chunks"""
     # https://github.com/openseadragon/openseadragon/wiki/The-DZI-File-Format#overlap
     # Here we trim overlapping tiles or pad edge tiles based on the chunk key.
-    ysize, xsize, _ = arr.shape
+    size_y, size_x, _ = arr.shape
     tilesize, overlap = dzi_meta.tilesize, dzi_meta.overlap
 
-    if xsize == tilesize and ysize == tilesize:
-        # Decoded image is already correct size.
-        return arr
+    # Easy to detect top/left.
+    top_edge = y == 0
+    left_edge = x == 0
 
-    # TODO: There is probably a more elegant way to do this...
-    view = arr
-    if xsize - tilesize == 2 * overlap:
-        # Inner x; overlap on left and right
-        view = view[:, overlap:-overlap, :]
+    # How much overlap to expect if not an edge.
+    overlap_y = overlap if top_edge else 2 * overlap
+    overlap_x = overlap if left_edge else 2 * overlap
 
-    if ysize - tilesize == 2 * overlap:
-        # Inner y; overlap on top and bottom
-        view = view[overlap:-overlap, :, :]
+    # If tile is not full size plus both overlaps then it must
+    # be a left or bottom edge.
+    bottom_edge = size_y < tilesize + overlap_y
+    right_edge = size_x < tilesize + overlap_x
 
-    if xsize - tilesize == overlap:
-        # Edge x; overlap on left or right
-        xslice = slice(None, -overlap) if x == 0 else slice(overlap, None)
-        view = view[:, xslice, :]
+    # Trim overlaps based on whether we are interior/edge/corner.
+    y0 = None if top_edge else overlap
+    y1 = None if bottom_edge else -overlap
+    x0 = None if left_edge else overlap
+    x1 = None if right_edge else -overlap
 
-    if ysize - tilesize == overlap:
-        # Edge y; overlap on top or bottom
-        yslice = slice(None, -overlap) if y == 0 else slice(overlap, None)
-        view = view[yslice, :, :]
+    view = arr[y0:y1, x0:x1, :]
 
     if view.shape[0] < tilesize or view.shape[1] < tilesize:
-        # Tile is smaller than tilesize; Needs to be padded.
+        # Pad tiles out to tilesize if needed.
         y_pad = tilesize - view.shape[0]
         x_pad = tilesize - view.shape[1]
-        return np.pad(view, ((0, y_pad), (0, x_pad), (0, 0)))
+        view = np.pad(view, ((0, y_pad), (0, x_pad), (0, 0)))
 
     return view
 
