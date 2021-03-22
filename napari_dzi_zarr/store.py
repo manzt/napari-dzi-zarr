@@ -136,8 +136,8 @@ class DZIStore:
                 arr=tile, x=int(x), y=int(y), dzi_meta=self._dzi_meta
             )
             return trimmed_tile.tobytes()
-        except:
-            raise KeyError
+        except Exception:
+            raise KeyError(key)
 
     def __setitem__(self, key, value):
         raise NotImplementedError
