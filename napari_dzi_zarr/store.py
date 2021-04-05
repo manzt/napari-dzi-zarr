@@ -75,26 +75,30 @@ def _normalize_chunk(
     size_y, size_x, _ = arr.shape
     tilesize, overlap = dzi_meta.tilesize, dzi_meta.overlap
 
-    # Easy to detect top/left.
-    top_edge = y == 0
-    left_edge = x == 0
+    if overlap == 0:
+        # No overlap; no need to trim overlap.
+        view = arr
+    else:
+        # Easy to detect top/left.
+        top_edge = y == 0
+        left_edge = x == 0
 
-    # How much overlap to expect if not an edge.
-    overlap_y = overlap if top_edge else 2 * overlap
-    overlap_x = overlap if left_edge else 2 * overlap
+        # How much overlap to expect if not an edge.
+        overlap_y = overlap if top_edge else 2 * overlap
+        overlap_x = overlap if left_edge else 2 * overlap
 
-    # If tile is not full size plus both overlaps then it must
-    # be a left or bottom edge.
-    bottom_edge = size_y < tilesize + overlap_y
-    right_edge = size_x < tilesize + overlap_x
+        # If tile is not full size plus both overlaps then it must
+        # be a left or bottom edge.
+        bottom_edge = size_y < tilesize + overlap_y
+        right_edge = size_x < tilesize + overlap_x
 
-    # Trim overlaps based on whether we are interior/edge/corner.
-    y0 = None if top_edge else overlap
-    y1 = None if bottom_edge else -overlap
-    x0 = None if left_edge else overlap
-    x1 = None if right_edge else -overlap
+        # Trim overlaps based on whether we are interior/edge/corner.
+        y0 = None if top_edge else overlap
+        y1 = None if bottom_edge else -overlap
+        x0 = None if left_edge else overlap
+        x1 = None if right_edge else -overlap
 
-    view = arr[y0:y1, x0:x1, :]
+        view = arr[y0:y1, x0:x1, :]
 
     if view.shape[0] < tilesize or view.shape[1] < tilesize:
         # Pad tiles out to tilesize if needed.
