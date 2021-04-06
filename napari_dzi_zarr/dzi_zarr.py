@@ -1,8 +1,9 @@
+from pathlib import Path
+
 import dask.array as da
 import zarr
 from napari_plugin_engine import napari_hook_implementation
 
-from pathlib import Path
 from .store import DZIStore
 
 

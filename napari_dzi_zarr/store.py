@@ -1,34 +1,38 @@
-import fsspec
-from zarr.util import json_dumps
-import numpy as np
-import imageio
-
 import xml.etree.ElementTree as ET
-from collections import namedtuple
+from dataclasses import dataclass
 
-ZARR_FORMAT = 2
-ZARR_META_KEY = ".zattrs"
-ZARR_ARRAY_META_KEY = ".zarray"
-ZARR_GROUP_META_KEY = ".zgroup"
+import fsspec
+import imageio
+import numpy as np
+from zarr.storage import init_array, init_group
+from zarr.util import json_dumps
 
-DZIMetadata = namedtuple("DZIMetadata", "tilesize overlap format height width")
 
+@dataclass
+class DZIMetadata:
+    tilesize: int
+    overlap: int
+    format: str
+    height: int
+    width: int
 
-def _parse_DZI(xml_str: str) -> DZIMetadata:
-    Image = ET.fromstring(xml_str)
-    Size = Image[0]
-    return DZIMetadata(
-        tilesize=int(Image.get("TileSize")),
-        overlap=int(Image.get("Overlap")),
-        format=Image.get("Format"),
-        width=int(Size.get("Width")),
-        height=int(Size.get("Height")),
-    )
+    @classmethod
+    def from_xml(cls, text: str):
+        Image = ET.fromstring(text)
+        Size = Image[0]
+        return cls(
+            tilesize=int(Image.get("TileSize")),
+            overlap=int(Image.get("Overlap")),
+            format=Image.get("Format"),
+            width=int(Size.get("Width")),
+            height=int(Size.get("Height")),
+        )
 
 
 def _init_meta_store(dzi_meta: DZIMetadata, csize: int) -> dict:
     """Generates zarr metadata key-value mapping for all levels of DZI pyramid"""
-    d = dict()
+    store = dict()
+
     # DZI generates all levels of the pyramid
     # Level 0 is 1x1 image, so we need to calculate the max level (highest resolution)
     # and trim the pyramid to just the tiled levels.
@@ -39,31 +43,25 @@ def _init_meta_store(dzi_meta: DZIMetadata, csize: int) -> dict:
     levels = list(reversed(range(max_level + 1)))[:nlevels]
 
     # Create root group
-    group_meta = dict(zarr_format=ZARR_FORMAT)
-    d[ZARR_GROUP_META_KEY] = json_dumps(group_meta)
+    init_group(store)
 
     # Create root attrs (multiscale meta)
     datasets = [dict(path=str(i)) for i in levels]
     root_attrs = dict(multiscales=[dict(datasets=datasets, version="0.1")])
-    d[ZARR_META_KEY] = json_dumps(root_attrs)
+    store[".zattrs"] = json_dumps(root_attrs)
 
     # Create zarr array meta for each level of DZI pyramid
     for level in range(nlevels):
-        xsize, ysize = (dzi_meta.width // 2 ** level, dzi_meta.height // 2 ** level)
-        arr_meta_key = f"{max_level - level}/{ZARR_ARRAY_META_KEY}"
-        arr_meta = dict(
-            shape=(ysize, xsize, csize),
+        init_array(
+            store=store,
+            path=f"{max_level - level}",
+            shape=(dzi_meta.height // 2 ** level, dzi_meta.width // 2 ** level, csize),
             chunks=(dzi_meta.tilesize, dzi_meta.tilesize, csize),
             compressor=None,  # chunk is decoded with store, so no zarr compression
             dtype="|u1",  # RGB/A images only
-            fill_value=0,
-            filters=None,
-            order="C",
-            zarr_format=ZARR_FORMAT,
         )
-        d[arr_meta_key] = json_dumps(arr_meta)
 
-    return d
+    return store
 
 
 def _normalize_chunk(
@@ -75,26 +73,30 @@ def _normalize_chunk(
     size_y, size_x, _ = arr.shape
     tilesize, overlap = dzi_meta.tilesize, dzi_meta.overlap
 
-    # Easy to detect top/left.
-    top_edge = y == 0
-    left_edge = x == 0
+    if overlap == 0:
+        # No overlap; no need to trim overlap.
+        view = arr
+    else:
+        # Easy to detect top/left.
+        top_edge = y == 0
+        left_edge = x == 0
 
-    # How much overlap to expect if not an edge.
-    overlap_y = overlap if top_edge else 2 * overlap
-    overlap_x = overlap if left_edge else 2 * overlap
+        # How much overlap to expect if not an edge.
+        overlap_y = overlap if top_edge else 2 * overlap
+        overlap_x = overlap if left_edge else 2 * overlap
 
-    # If tile is not full size plus both overlaps then it must
-    # be a left or bottom edge.
-    bottom_edge = size_y < tilesize + overlap_y
-    right_edge = size_x < tilesize + overlap_x
+        # If tile is not full size plus both overlaps then it must
+        # be a left or bottom edge.
+        bottom_edge = size_y < tilesize + overlap_y
+        right_edge = size_x < tilesize + overlap_x
 
-    # Trim overlaps based on whether we are interior/edge/corner.
-    y0 = None if top_edge else overlap
-    y1 = None if bottom_edge else -overlap
-    x0 = None if left_edge else overlap
-    x1 = None if right_edge else -overlap
+        # Trim overlaps based on whether we are interior/edge/corner.
+        y0 = None if top_edge else overlap
+        y1 = None if bottom_edge else -overlap
+        x0 = None if left_edge else overlap
+        x1 = None if right_edge else -overlap
 
-    view = arr[y0:y1, x0:x1, :]
+        view = arr[y0:y1, x0:x1, :]
 
     if view.shape[0] < tilesize or view.shape[1] < tilesize:
         # Pad tiles out to tilesize if needed.
@@ -110,7 +112,7 @@ class DZIStore:
         fs, meta_path = fsspec.core.url_to_fs(url, **storage_options)
         self.fs = fs
         self.root = meta_path.rsplit(".", 1)[0] + "_files"
-        self._dzi_meta = _parse_DZI(fs.cat(meta_path))
+        self._dzi_meta = DZIMetadata.from_xml(fs.cat(meta_path))
 
         if pilmode not in ["RGB", "RGBA"]:
             raise ValueError(f"pilmode must be 'RGB' or 'RGBA', got: {pilmode}")
