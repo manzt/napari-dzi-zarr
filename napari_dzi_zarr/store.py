@@ -8,7 +8,7 @@ import math
 import json
 from zarr.storage import init_array, init_group
 from zarr.util import json_dumps, json_loads
-
+import itertools
 
 @dataclass
 class DZIMetadata:
@@ -158,7 +158,7 @@ class DZIStore:
                 "Tile overlap must be 0 for DZI source to write reference."
             )
 
-        spec = dict(version="1.0", templates=dict(u=self.root), gen=[], refs={})
+        spec = dict(version=1, templates=dict(u=self.root), refs={})
         compressors = dict(
             jpeg="imagecodecs_jpeg",
             jpg="imagecodecs_jpeg",
@@ -174,17 +174,15 @@ class DZIStore:
                 # Create generated entry for tile/chunk references
                 y, x, _ = meta["shape"]
                 y_chunk, x_chunk, _ = meta["chunks"]
-                gen = dict(
-                    key=k.rstrip(".zarray") + "{{j}}.{{i}}.0",
-                    url="{{u}}/{{i}}_{{j}}." + self._dzi_meta.format,
-                    offset=None,
-                    length=None,
-                    dimensions=dict(
-                        i=dict(stop=math.floor(x / x_chunk)),
-                        j=dict(stop=math.floor(y / y_chunk)),
-                    ),
-                )
-                spec["gen"].append(gen)
+
+                for (i, j) in itertools.product(
+                    range(math.floor(x / x_chunk)),
+                    range(math.floor(y / y_chunk)),
+                ):
+                    arr_key = k.rstrip(".zarray/")
+                    key = f"{arr_key}/{j}.{i}.0"
+                    url = "{{u}}" + f"/{arr_key}/{i}_{j}.{self._dzi_meta.format}"
+                    spec["refs"][key] = [url]
 
                 # Override `null` compressor
                 meta["compressor"] = dict(id=codec_id)
