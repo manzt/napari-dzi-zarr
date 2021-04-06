@@ -153,25 +153,46 @@ class DZIStore:
         return iter(self._meta_store)
 
     def write_fsspec(self, fname: str):
-        spec = dict(version="1.0", refs=dict(), gen=list(), templates=dict())
-        spec["templates"]["u"] = self.root
+        if self._dzi_meta.overlap != 0:
+            raise ValueError(
+                "Tile overlap must be 0 for DZI source to write reference."
+            )
+
+        spec = dict(version="1.0", templates=dict(u=self.root), gen=[], refs={})
+        compressors = dict(
+            jpeg="imagecodecs_jpeg",
+            jpg="imagecodecs_jpeg",
+            png="imagecodecs_png",
+        )
+        codec_id = compressors[self._dzi_meta.format]
+
         for k, v in self._meta_store.items():
             if k.endswith(".zarray"):
+                # Decode array metadata
                 meta = json_loads(v)
-                meta["compressor"] = dict(id="jpeg")
-                shape = meta["shape"]
-                chunks = meta["chunks"]
-                v = json_dumps(meta)
+
+                # Create generated entry for tile/chunk references
+                y, x, _ = meta["shape"]
+                y_chunk, x_chunk, _ = meta["chunks"]
                 gen = dict(
-                    key=k.rstrip(".zarray") + "{{ j }}.{{ i }}.0",
-                    url="{{ u }}/{{ i }}_{{ j }}." + self._dzi_meta.format,
+                    key=k.rstrip(".zarray") + "{{j}}.{{i}}.0",
+                    url="{{u}}/{{i}}_{{j}}." + self._dzi_meta.format,
+                    offset=None,
+                    length=None,
                     dimensions=dict(
-                        i=dict(stop=math.ceil(shape[1] / chunks[1])),
-                        j=dict(stop=math.ceil(shape[0] / chunks[0])),
+                        i=dict(stop=math.floor(x / x_chunk)),
+                        j=dict(stop=math.floor(y / y_chunk)),
                     ),
                 )
                 spec["gen"].append(gen)
+
+                # Override `null` compressor
+                meta["compressor"] = dict(id=codec_id)
+                v = json.dumps(meta, indent=1).encode("ascii")
+
+            # Write `.zattrs`, `.zgroup`, and modified `.zarray` metadata
             spec["refs"][k] = v.decode()
+
         with open(fname, mode="w") as fh:
             fh.write(json.dumps(spec, indent=1))
 
