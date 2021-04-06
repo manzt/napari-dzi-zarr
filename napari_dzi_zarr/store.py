@@ -162,7 +162,7 @@ class DZIStore:
     def __iter__(self):
         return iter(self._meta_store)
 
-    def write_fsspec(self, filename: str):
+    def write_fsspec(self, filename: str = None):
         if self._dzi_meta.overlap != 0:
             raise ValueError(
                 "Tile overlap must be 0 for DZI source to write reference."
@@ -203,12 +203,9 @@ class DZIStore:
             # Write `.zattrs`, `.zgroup`, and modified `.zarray` metadata
             spec["refs"][k] = v.decode()
 
+        if filename is None:
+            # return refs directly as a dict
+            return spec
+
         with open(filename, mode="w") as fh:
             fh.write(json.dumps(spec, indent=1))
-
-
-if __name__ == "__main__":
-    import sys
-
-    store = DZIStore(sys.argv[1])
-    store.write_fsspec("ref.json")
