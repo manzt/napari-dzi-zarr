@@ -4,8 +4,10 @@ from dataclasses import dataclass
 import fsspec
 import imageio
 import numpy as np
+import math
+import json
 from zarr.storage import init_array, init_group
-from zarr.util import json_dumps
+from zarr.util import json_dumps, json_loads
 
 
 @dataclass
@@ -149,3 +151,33 @@ class DZIStore:
 
     def __iter__(self):
         return iter(self._meta_store)
+
+    def write_fsspec(self, fname: str):
+        spec = dict(version="1.0", refs=dict(), gen=list(), templates=dict())
+        spec["templates"]["u"] = self.root
+        for k, v in self._meta_store.items():
+            if k.endswith(".zarray"):
+                meta = json_loads(v)
+                meta["compressor"] = dict(id="jpeg")
+                shape = meta["shape"]
+                chunks = meta["chunks"]
+                v = json_dumps(meta)
+                gen = dict(
+                    key=k.rstrip(".zarray") + "{{ j }}.{{ i }}.0",
+                    url="{{ u }}/{{ i }}_{{ j }}." + self._dzi_meta.format,
+                    dimensions=dict(
+                        i=dict(stop=math.ceil(shape[1] / chunks[1])),
+                        j=dict(stop=math.ceil(shape[0] / chunks[0])),
+                    ),
+                )
+                spec["gen"].append(gen)
+            spec["refs"][k] = v.decode()
+        with open(fname, mode="w") as fh:
+            fh.write(json.dumps(spec, indent=1))
+
+
+if __name__ == "__main__":
+    import sys
+
+    store = DZIStore(sys.argv[1])
+    store.write_fsspec("ref.json")
