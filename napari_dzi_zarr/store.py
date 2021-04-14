@@ -1,4 +1,3 @@
-import itertools
 import json
 import math
 import xml.etree.ElementTree as ET
@@ -168,7 +167,7 @@ class DZIStore:
                 "Tile overlap must be 0 for DZI source to write reference."
             )
 
-        spec = dict(version=1, templates=dict(u=self.root), refs={})
+        spec = dict(version=1, templates=dict(u=self.root), gen=[], refs={})
         compressors = dict(
             jpeg="imagecodecs_jpeg",
             jpg="imagecodecs_jpeg",
@@ -185,16 +184,17 @@ class DZIStore:
                 shape = meta["shape"]
                 chunks = meta["chunks"]
 
-                for (i, j) in itertools.product(
-                    # Cannot map variable sized chunks to zarr data model.
-                    # We don't add edge tiles to the referend (right, and bottom)
-                    range(math.floor(shape[1] / chunks[1])),
-                    range(math.floor(shape[0] / chunks[0])),
-                ):
-                    arr_key = k.rstrip(".zarray/")
-                    key = f"{arr_key}/{j}.{i}" + (".0" if len(shape) == 3 else "")
-                    url = "{{u}}" + f"/{arr_key}/{i}_{j}.{self._dzi_meta.format}"
-                    spec["refs"][key] = [url]
+                arr_key = k.rstrip(".zarray/")
+                ckey = ".0" if len(shape) == 3 else ""
+                gen = dict(
+                    key=arr_key + "/{{j}}.{{i}}" + ckey,
+                    url="{{u}}/{{i}}_{{j}}." + self._dzi_meta.format,
+                    dimensions=dict(
+                        j=dict(stop=math.floor(shape[1] / chunks[1])),
+                        i=dict(stop=math.floor(shape[0] / chunks[0])),
+                    ),
+                )
+                spec["gen"].append(gen)
 
                 # Override `null` compressor
                 meta["compressor"] = dict(id=codec_id)
