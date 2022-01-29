@@ -13,12 +13,12 @@ This [napari] plugin was generated with [Cookiecutter] using with [@napari]'s [c
 
 ## Description 
 
-The [DZI File Format](https://github.com/openseadragon/openseadragon/wiki/The-DZI-File-Format) 
-is a pyramidal tile source specification where individual tiles are RGB/RGBA JPEG/PNG images. 
-DZI is a very popular tile source for zoomable web-viewers like 
-[OpenSeadragon](https://openseadragon.github.io/), and as a result many tile sources are available over 
-HTTP. This plugin wraps a DZI tile source (local or remote) as a multiscale Zarr, where each pyramidal level is a `zarr.Array` of shape `(level_height, level_width, 3/4)`, allowing the same images to be viewed 
-in `napari` + `dask`.
+The [DZI File Format](https://github.com/openseadragon/openseadragon/wiki/The-DZI-File-Format)
+is a pyramidal tile source specification where individual tiles are RGB/RGBA JPEG/PNG images.
+DZI is a popular tile source for zoomable web-viewers like [OpenSeadragon](https://openseadragon.github.io/),
+and as a result many tile sources are available over HTTP. This plugin wraps a DZI tile source
+(local or remote) as a multiscale Zarr, where each pyramidal level is a `zarr.Array` of shape
+`(level_height, level_width, 3/4)`, allowing the same images to be viewed in `napari` + `dask`.
 
 ## Installation
 
